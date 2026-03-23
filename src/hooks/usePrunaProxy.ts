@@ -4,13 +4,17 @@
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react';
-import type { PrunaInput, PrunaResult, GenerateOptions } from '../core/entities/types';
+import type { PrunaInput, PrunaResult, GenerateOptions, GenerationStage } from '../core/entities/types';
+
+interface ApiErrorResponse {
+  message?: string;
+}
 
 export interface UsePrunaProxyOptions {
   proxyUrl: string;
   onSuccess?: (result: PrunaResult) => void;
   onError?: (error: Error) => void;
-  onProgress?: (stage: string) => void;
+  onProgress?: (stage: GenerationStage) => void;
 }
 
 export interface UsePrunaProxyReturn {
@@ -69,8 +73,8 @@ export function usePrunaProxy(
         });
 
         if (!res.ok) {
-          const err = await res.json().catch(() => ({ message: res.statusText }));
-          throw new Error((err as { message?: string }).message ?? `Proxy error: ${res.status}`);
+          const err = await res.json().catch(() => ({ message: res.statusText })) as ApiErrorResponse;
+          throw new Error(err.message ?? `Proxy error: ${res.status}`);
         }
 
         const data: PrunaResult = await res.json();
@@ -81,7 +85,9 @@ export function usePrunaProxy(
         return data;
       } catch (err) {
         if (!mountedRef.current) return null;
-        if (err instanceof Error && err.message.includes('cancelled')) return null;
+        if (err instanceof Error && (err.name === 'AbortError' || err.name === 'DOMException' && (err as DOMException).code === DOMException.ABORT_ERR)) {
+          return null;
+        }
         const e = err instanceof Error ? err : new Error(String(err));
         setError(e);
         optionsRef.current?.onError?.(e);

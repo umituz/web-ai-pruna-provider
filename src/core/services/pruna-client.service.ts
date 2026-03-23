@@ -12,6 +12,10 @@ import type {
 import { PRUNA_BASE_URL, PRUNA_PREDICTIONS_URL, PRUNA_FILES_URL } from '../constants';
 import { base64ToBytes, stripBase64Prefix, extractUri, resolveUri } from '../utils/helpers';
 
+interface ApiErrorResponse {
+  message?: string;
+}
+
 // ── File upload ───────────────────────────────────────────────────────────────
 
 /**
@@ -23,7 +27,10 @@ export async function uploadImage(
   apiKey: string,
   onProgress?: (stage: GenerationStage) => void,
 ): Promise<string> {
-  if (base64OrUrl.startsWith('http')) return base64OrUrl;
+  if (base64OrUrl.startsWith('https://')) return base64OrUrl;
+  if (base64OrUrl.startsWith('http://')) {
+    throw new Error('Only HTTPS URLs are supported for security.');
+  }
 
   onProgress?.('uploading');
 
@@ -40,9 +47,7 @@ export async function uploadImage(
   if (bytes[0] === 0xFF && bytes[1] === 0xD8) mime = 'image/jpeg';
   else if (bytes[0] === 0x52 && bytes[1] === 0x49) mime = 'image/webp';
 
-  const arrayBuffer = new ArrayBuffer(bytes.byteLength);
-  new Uint8Array(arrayBuffer).set(bytes);
-  const blob = new Blob([arrayBuffer], { type: mime });
+  const blob = new Blob([bytes.buffer as ArrayBuffer], { type: mime });
   const ext = mime.split('/')[1];
   const formData = new FormData();
   formData.append('content', blob, `upload.${ext}`);
@@ -54,8 +59,8 @@ export async function uploadImage(
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ message: res.statusText }));
-    throw new Error((err as { message?: string }).message ?? `File upload error: ${res.status}`);
+    const err = await res.json().catch(() => ({ message: res.statusText })) as ApiErrorResponse;
+    throw new Error(err.message ?? `File upload error: ${res.status}`);
   }
 
   const data: PrunaFileUploadResponse = await res.json();
@@ -90,10 +95,10 @@ export async function submitPrediction(
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ message: res.statusText }));
-    const msg = (err as { message?: string }).message ?? `API error: ${res.status}`;
-    const error = new Error(msg);
-    (error as Error & { statusCode?: number }).statusCode = res.status;
+    const err = await res.json().catch(() => ({ message: res.statusText })) as ApiErrorResponse;
+    const msg = err.message ?? `API error: ${res.status}`;
+    const error = new Error(msg) as Error & { statusCode: number };
+    error.statusCode = res.status;
     throw error;
   }
 
@@ -127,7 +132,12 @@ export async function pollForResult(
 
     try {
       const res = await fetch(fullUrl, { headers: { apikey: apiKey }, signal });
-      if (!res.ok) continue;
+      if (!res.ok) {
+        if (res.status === 401 || res.status === 403) {
+          throw new Error('Authentication failed. Please check your API key.');
+        }
+        continue;
+      }
 
       const data: PrunaPredictionResponse = await res.json();
 
