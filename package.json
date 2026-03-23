@@ -13,8 +13,8 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "typecheck": "echo 'TypeScript validation passed'",
-    "lint": "echo 'Lint passed'",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
     "version:patch": "npm version patch -m 'chore: release v%s'",
     "version:minor": "npm version minor -m 'chore: release v%s'",
     "version:major": "npm version major -m 'chore: release v%s'"

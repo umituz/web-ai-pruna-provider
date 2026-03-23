@@ -69,7 +69,9 @@ export function usePrunaGeneration(
         return res;
       } catch (err) {
         if (!mountedRef.current) return null;
-        if (err instanceof Error && err.message.includes('cancelled')) return null;
+        if (err instanceof Error && (err.name === 'AbortError' || err.name === 'DOMException' && (err as DOMException).code === DOMException.ABORT_ERR)) {
+          return null;
+        }
         const e = err instanceof Error ? err : new Error(String(err));
         setError(e);
         optionsRef.current?.onError?.(e);

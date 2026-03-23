@@ -6,7 +6,7 @@
 import type { PrunaInput, PrunaResult, TextToVideoInput, GenerateOptions } from '../../core/entities/types';
 import { DEFAULT_ASPECT_RATIO, P_VIDEO_DEFAULTS, POLL_DEFAULTS } from '../../core/constants';
 import { uploadImage, submitPrediction, pollForResult } from '../../core/services/pruna-client.service';
-import { stripBase64Prefix, extractUri } from '../../core/utils/helpers';
+import { stripBase64Prefix, extractUri, resolveUri } from '../../core/utils/helpers';
 
 // ── generate ─────────────────────────────────────────────────────────────────
 
@@ -29,7 +29,7 @@ export async function generate(
 
   const syncUri = extractUri(response);
   if (syncUri) {
-    const url = syncUri.startsWith('/') ? `https://api.pruna.ai${syncUri}` : syncUri;
+    const url = resolveUri(syncUri);
     return { url, model: input.model };
   }
 
