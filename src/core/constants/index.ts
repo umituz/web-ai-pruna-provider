@@ -20,4 +20,7 @@ export const P_VIDEO_DEFAULTS = {
 export const POLL_DEFAULTS = {
   intervalMs: 3_000,
   maxAttempts: 120,
+  maxIntervalMs: 10_000,
+  backoffBase: 1.5,
+  jitterPercent: 0.1,
 } as const;

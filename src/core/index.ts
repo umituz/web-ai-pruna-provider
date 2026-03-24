@@ -32,7 +32,41 @@ export {
 } from './constants';
 
 // Utils
-export { stripBase64Prefix, base64ToBytes, extractUri, resolveUri } from './utils/helpers';
+export {
+  stripBase64Prefix,
+  base64ToBytes,
+  extractUri,
+  resolveUri,
+} from './utils/helpers';
+
+// Advanced utils (tree-shakeable, optional imports)
+export {
+  shallowEqual,
+  hashObject,
+  memoHash,
+} from './utils/compare';
+
+export {
+  cleanupAbortController,
+  cleanupRefs,
+  createCleanupFn,
+} from './utils/cleanup';
+
+export {
+  LRUCache,
+  createCache,
+} from './utils/cache';
+
+export {
+  RequestDeduplicator,
+  globalDeduplicator,
+} from './utils/request-deduplicator';
+
+export {
+  getPerformanceMonitor,
+  measurePerformance,
+  withPerformanceMonitoring,
+} from './utils/performance';
 
 // Services
 export { uploadImage, submitPrediction, pollForResult } from './services/pruna-client.service';
