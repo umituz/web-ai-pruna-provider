@@ -108,8 +108,18 @@ export async function submitPrediction(
 // ── Polling ───────────────────────────────────────────────────────────────────
 
 /**
- * Poll async prediction until succeeded/failed or timeout.
- * Polls every `intervalMs` ms, up to `maxAttempts` (~6 min at defaults).
+ * Calculate exponential backoff delay with jitter
+ * Prevents thundering herd problem and reduces server load
+ */
+function calculateBackoff(attempt: number, baseInterval: number): number {
+  const exponentialDelay = Math.min(baseInterval * Math.pow(1.5, attempt), 10000); // Max 10s
+  const jitter = exponentialDelay * 0.1 * Math.random(); // ±10% jitter
+  return exponentialDelay + jitter;
+}
+
+/**
+ * Poll async prediction until succeeded/failed or timeout (optimized).
+ * Uses exponential backoff to reduce server load and improve efficiency.
  */
 export async function pollForResult(
   pollUrl: string,
@@ -120,40 +130,58 @@ export async function pollForResult(
   onProgress?: (stage: GenerationStage, attempt: number) => void,
 ): Promise<string> {
   const fullUrl = pollUrl.startsWith('http') ? pollUrl : `${PRUNA_BASE_URL}${pollUrl}`;
+  const controller = new AbortController();
 
-  for (let i = 0; i < maxAttempts; i++) {
-    if (signal?.aborted) throw new Error('Request cancelled by user');
+  // Chain abort signals
+  signal?.addEventListener('abort', () => controller.abort());
 
-    await new Promise<void>(resolve => setTimeout(resolve, intervalMs));
+  try {
+    for (let i = 0; i < maxAttempts; i++) {
+      if (signal?.aborted) throw new Error('Request cancelled by user');
 
-    if (signal?.aborted) throw new Error('Request cancelled by user');
+      // Exponential backoff with jitter
+      const delay = calculateBackoff(i, intervalMs);
+      await new Promise<void>(resolve => setTimeout(resolve, delay));
 
-    onProgress?.('polling', i + 1);
+      if (signal?.aborted) throw new Error('Request cancelled by user');
 
-    try {
-      const res = await fetch(fullUrl, { headers: { apikey: apiKey }, signal });
-      if (!res.ok) {
-        if (res.status === 401 || res.status === 403) {
-          throw new Error('Authentication failed. Please check your API key.');
+      onProgress?.('polling', i + 1);
+
+      try {
+        const res = await fetch(fullUrl, {
+          headers: { apikey: apiKey },
+          signal: controller.signal,
+        });
+
+        if (!res.ok) {
+          if (res.status === 401 || res.status === 403) {
+            throw new Error('Authentication failed. Please check your API key.');
+          }
+          // Continue polling on other errors
+          continue;
         }
-        continue;
-      }
 
-      const data: PrunaPredictionResponse = await res.json();
+        const data: PrunaPredictionResponse = await res.json();
 
-      if (data.status === 'succeeded' || data.status === 'completed') {
-        const uri = extractUri(data);
-        if (uri) return resolveUri(uri);
-      } else if (data.status === 'failed') {
-        throw new Error(data.error ?? 'Generation failed during processing.');
+        if (data.status === 'succeeded' || data.status === 'completed') {
+          const uri = extractUri(data);
+          if (uri) return resolveUri(uri);
+        } else if (data.status === 'failed') {
+          throw new Error(data.error ?? 'Generation failed during processing.');
+        }
+      } catch (err) {
+        if (err instanceof Error && err.name === 'AbortError') {
+          throw new Error('Request cancelled by user');
+        }
+        // Non-fatal poll error — continue polling with exponential backoff
+        if (err instanceof Error && err.message.includes('Authentication failed')) {
+          throw err;
+        }
       }
-    } catch (err) {
-      if (err instanceof Error && (err.message.includes('cancelled') || err.message.includes('failed'))) {
-        throw err;
-      }
-      // Non-fatal poll error — continue polling
     }
-  }
 
-  throw new Error('Generation timed out. Maximum polling attempts reached.');
+    throw new Error('Generation timed out. Maximum polling attempts reached.');
+  } finally {
+    controller.abort();
+  }
 }

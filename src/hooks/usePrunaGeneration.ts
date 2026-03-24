@@ -1,11 +1,12 @@
 /**
  * usePrunaGeneration Hook
- * @description React hook for Pruna AI generation with direct API key
+ * @description React hook for Pruna AI generation with direct API key (optimized)
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { generate } from '../generation/services/generation.service';
 import type { PrunaInput, PrunaResult, GenerateOptions } from '../core/entities/types';
+import { shallowEqual } from '../core/utils/compare';
 
 export interface UsePrunaGenerationOptions {
   onSuccess?: (result: PrunaResult) => void;
@@ -23,7 +24,7 @@ export interface UsePrunaGenerationReturn {
 }
 
 /**
- * React hook for Pruna AI generation.
+ * React hook for Pruna AI generation (optimized).
  * Passes `apiKey` directly to Pruna — use `usePrunaProxy` if you need server-side key security.
  */
 export function usePrunaGeneration(
@@ -37,14 +38,26 @@ export function usePrunaGeneration(
   const abortRef = useRef<AbortController | null>(null);
   const optionsRef = useRef(options);
   const mountedRef = useRef(true);
+  const prevOptionsRef = useRef<UsePrunaGenerationOptions | undefined>(options);
 
-  useEffect(() => { optionsRef.current = options; }, [options]);
+  // Stabilize options with shallow comparison
+  const stabilizedOptions = useMemo(() => {
+    if (!prevOptionsRef.current || !shallowEqual(prevOptionsRef.current, options)) {
+      prevOptionsRef.current = options;
+    }
+    return prevOptionsRef.current;
+  }, [options]);
+
+  useEffect(() => {
+    optionsRef.current = stabilizedOptions;
+  }, [stabilizedOptions]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       abortRef.current?.abort();
+      abortRef.current = null;
     };
   }, []);
 
@@ -63,12 +76,18 @@ export function usePrunaGeneration(
           signal: controller.signal,
           onProgress: optionsRef.current?.onProgress,
         });
-        if (!mountedRef.current) return null;
+        if (!mountedRef.current) {
+          controller.abort();
+          return null;
+        }
         setResult(res);
         optionsRef.current?.onSuccess?.(res);
         return res;
       } catch (err) {
-        if (!mountedRef.current) return null;
+        if (!mountedRef.current) {
+          controller.abort();
+          return null;
+        }
         if (err instanceof Error && (err.name === 'AbortError' || err.name === 'DOMException' && (err as DOMException).code === DOMException.ABORT_ERR)) {
           return null;
         }
@@ -83,14 +102,22 @@ export function usePrunaGeneration(
     [apiKey],
   );
 
-  const cancel = useCallback(() => { abortRef.current?.abort(); }, []);
+  const cancel = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+  }, []);
 
   const reset = useCallback(() => {
     abortRef.current?.abort();
+    abortRef.current = null;
     setResult(null);
     setError(null);
     setIsLoading(false);
   }, []);
 
-  return { result, isLoading, error, generate: run, cancel, reset };
+  // Memoize return object to prevent unnecessary re-renders
+  return useMemo<UsePrunaGenerationReturn>(
+    () => ({ result, isLoading, error, generate: run, cancel, reset }),
+    [result, isLoading, error, run, cancel, reset],
+  );
 }

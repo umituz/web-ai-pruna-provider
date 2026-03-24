@@ -1,10 +1,11 @@
 /**
  * usePrunaProxy Hook
- * @description React hook for Pruna AI generation via proxy server
+ * @description React hook for Pruna AI generation via proxy server (optimized)
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import type { PrunaInput, PrunaResult, GenerateOptions, GenerationStage } from '../core/entities/types';
+import { shallowEqual } from '../core/utils/compare';
 
 interface ApiErrorResponse {
   message?: string;
@@ -27,7 +28,7 @@ export interface UsePrunaProxyReturn {
 }
 
 /**
- * React hook for Pruna AI generation via proxy server.
+ * React hook for Pruna AI generation via proxy server (optimized).
  * Use this when you need server-side API key security.
  */
 export function usePrunaProxy(
@@ -41,14 +42,26 @@ export function usePrunaProxy(
   const abortRef = useRef<AbortController | null>(null);
   const optionsRef = useRef(options);
   const mountedRef = useRef(true);
+  const prevOptionsRef = useRef<UsePrunaProxyOptions | undefined>(options);
 
-  useEffect(() => { optionsRef.current = options; }, [options]);
+  // Stabilize options with shallow comparison
+  const stabilizedOptions = useMemo(() => {
+    if (!prevOptionsRef.current || !shallowEqual(prevOptionsRef.current, options)) {
+      prevOptionsRef.current = options;
+    }
+    return prevOptionsRef.current;
+  }, [options]);
+
+  useEffect(() => {
+    optionsRef.current = stabilizedOptions;
+  }, [stabilizedOptions]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       abortRef.current?.abort();
+      abortRef.current = null;
     };
   }, []);
 
@@ -79,12 +92,18 @@ export function usePrunaProxy(
 
         const data: PrunaResult = await res.json();
 
-        if (!mountedRef.current) return null;
+        if (!mountedRef.current) {
+          controller.abort();
+          return null;
+        }
         setResult(data);
         optionsRef.current?.onSuccess?.(data);
         return data;
       } catch (err) {
-        if (!mountedRef.current) return null;
+        if (!mountedRef.current) {
+          controller.abort();
+          return null;
+        }
         if (err instanceof Error && (err.name === 'AbortError' || err.name === 'DOMException' && (err as DOMException).code === DOMException.ABORT_ERR)) {
           return null;
         }
@@ -99,14 +118,22 @@ export function usePrunaProxy(
     [proxyUrl],
   );
 
-  const cancel = useCallback(() => { abortRef.current?.abort(); }, []);
+  const cancel = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+  }, []);
 
   const reset = useCallback(() => {
     abortRef.current?.abort();
+    abortRef.current = null;
     setResult(null);
     setError(null);
     setIsLoading(false);
   }, []);
 
-  return { result, isLoading, error, generate: run, cancel, reset };
+  // Memoize return object to prevent unnecessary re-renders
+  return useMemo<UsePrunaProxyReturn>(
+    () => ({ result, isLoading, error, generate: run, cancel, reset }),
+    [result, isLoading, error, run, cancel, reset],
+  );
 }

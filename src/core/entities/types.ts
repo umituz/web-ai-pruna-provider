@@ -1,6 +1,6 @@
 /**
  * Pruna AI Types - Core entities and type definitions
- * @description Shared types for Pruna AI generation
+ * @description Shared types for Pruna AI generation (optimized with readonly)
  */
 
 export type PrunaModelId = 'p-image' | 'p-image-edit' | 'p-video';
@@ -12,37 +12,38 @@ export type PrunaResolution = '720p' | '1080p';
 export type GenerationStage = 'uploading' | 'predicting' | 'polling';
 
 export interface GenerateOptions {
-  signal?: AbortSignal;
-  onProgress?: (stage: GenerationStage, attempt?: number) => void;
+  readonly signal?: AbortSignal;
+  readonly onProgress?: (stage: GenerationStage, attempt?: number) => void;
+  readonly useCache?: boolean;
 }
 
 // ── Real model inputs ────────────────────────────────────────────────────────
 
 export interface TextToImageInput {
-  model: 'p-image';
-  prompt: string;
-  aspect_ratio?: PrunaAspectRatio;
-  seed?: number;
+  readonly model: 'p-image';
+  readonly prompt: string;
+  readonly aspect_ratio?: PrunaAspectRatio;
+  readonly seed?: number;
 }
 
 export interface ImageToImageInput {
-  model: 'p-image-edit';
-  prompt: string;
+  readonly model: 'p-image-edit';
+  readonly prompt: string;
   /** Base64 string or HTTPS URL */
-  image: string;
-  aspect_ratio?: PrunaAspectRatio;
-  seed?: number;
+  readonly image: string;
+  readonly aspect_ratio?: PrunaAspectRatio;
+  readonly seed?: number;
 }
 
 export interface ImageToVideoInput {
-  model: 'p-video';
-  prompt: string;
+  readonly model: 'p-video';
+  readonly prompt: string;
   /** Base64 string or HTTPS URL. Uploaded to Pruna file storage if base64. */
-  image: string;
-  duration?: number;
-  resolution?: PrunaResolution;
-  aspect_ratio?: PrunaAspectRatio;
-  draft?: boolean;
+  readonly image: string;
+  readonly duration?: number;
+  readonly resolution?: PrunaResolution;
+  readonly aspect_ratio?: PrunaAspectRatio;
+  readonly draft?: boolean;
 }
 
 /** Union of all real Pruna model inputs */
@@ -52,19 +53,19 @@ export type PrunaInput = TextToImageInput | ImageToImageInput | ImageToVideoInpu
 
 /** Input for the two-step text→image→video pipeline (not a real Pruna model) */
 export interface TextToVideoInput {
-  prompt: string;
-  duration?: number;
-  resolution?: PrunaResolution;
-  aspect_ratio?: PrunaAspectRatio;
-  draft?: boolean;
+  readonly prompt: string;
+  readonly duration?: number;
+  readonly resolution?: PrunaResolution;
+  readonly aspect_ratio?: PrunaAspectRatio;
+  readonly draft?: boolean;
 }
 
 // ── Result ───────────────────────────────────────────────────────────────────
 
 export interface PrunaResult {
   /** Direct URL to the generated image or video */
-  url: string;
-  model: PrunaModelId;
+  readonly url: string;
+  readonly model: PrunaModelId;
 }
 
 // ── Raw API response shapes ──────────────────────────────────────────────────
@@ -76,7 +77,7 @@ export interface PrunaPredictionResponse {
   readonly video_url?: string;
   readonly get_url?: string;
   readonly status_url?: string;
-  readonly status?: 'succeeded' | 'completed' | 'failed';
+  readonly status?: 'succeeded' | 'completed' | 'failed' | 'processing' | 'starting';
   readonly error?: string;
 }
 

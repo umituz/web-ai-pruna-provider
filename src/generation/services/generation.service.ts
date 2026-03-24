@@ -1,6 +1,6 @@
 /**
  * Pruna Generation Service
- * @description High-level generation orchestration
+ * @description High-level generation orchestration (optimized with caching)
  */
 
 import type { PrunaInput, PrunaResult, TextToVideoInput, GenerateOptions } from '../../core/entities/types';
@@ -8,16 +8,73 @@ import { DEFAULT_ASPECT_RATIO, P_VIDEO_DEFAULTS, POLL_DEFAULTS } from '../../cor
 import { uploadImage, submitPrediction, pollForResult } from '../../core/services/pruna-client.service';
 import { stripBase64Prefix, extractUri, resolveUri } from '../../core/utils/helpers';
 
+// Optional imports for tree-shaking
+let LRUCache: any = null;
+let globalDeduplicator: any = null;
+
+// Lazy load cache (tree-shakeable)
+async function getCache() {
+  if (!LRUCache) {
+    const module = await import('../../core/utils/cache');
+    LRUCache = module.LRUCache;
+  }
+  return LRUCache;
+}
+
+// Lazy load deduplicator (tree-shakeable)
+async function getDeduplicator() {
+  if (!globalDeduplicator) {
+    const module = await import('../../core/utils/request-deduplicator');
+    globalDeduplicator = module.globalDeduplicator;
+  }
+  return globalDeduplicator;
+}
+
 // ── generate ─────────────────────────────────────────────────────────────────
 
 /**
- * Generate an image or video using a real Pruna model.
+ * Generate a cache key for request deduplication
+ */
+function createCacheKey(apiKey: string, input: PrunaInput): string {
+  return `${apiKey}:${input.model}:${JSON.stringify(input, Object.keys(input).sort())}`;
+}
+
+/**
+ * Generate an image or video using a real Pruna model (optimized).
  *
  * @param apiKey  Your Pruna API key
  * @param input   Discriminated union: TextToImageInput | ImageToImageInput | ImageToVideoInput
- * @param options Optional: signal for cancellation, onProgress callback
+ * @param options Optional: signal for cancellation, onProgress callback, useCache flag
  */
 export async function generate(
+  apiKey: string,
+  input: PrunaInput,
+  options?: GenerateOptions & { useCache?: boolean },
+): Promise<PrunaResult> {
+  const { signal, onProgress, useCache = true } = options ?? {};
+
+  // Request deduplication (optional, tree-shakeable)
+  if (useCache) {
+    try {
+      const deduplicator = await getDeduplicator();
+      const cacheKey = createCacheKey(apiKey, input);
+
+      return deduplicator.execute(cacheKey, async () => {
+        return generateInternal(apiKey, input, { signal, onProgress });
+      }) as Promise<PrunaResult>;
+    } catch {
+      // Fallback to direct generation if deduplication fails
+      return generateInternal(apiKey, input, { signal, onProgress });
+    }
+  }
+
+  return generateInternal(apiKey, input, { signal, onProgress });
+}
+
+/**
+ * Internal generation logic (extracted for reusability)
+ */
+async function generateInternal(
   apiKey: string,
   input: PrunaInput,
   options?: GenerateOptions,
