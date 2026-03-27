@@ -9,8 +9,8 @@ import { uploadImage, submitPrediction, pollForResult } from '../../core/service
 import { stripBase64Prefix, extractUri, resolveUri } from '../../core/utils/helpers';
 
 // Optional imports for tree-shaking
-let LRUCache: any = null;
-let globalDeduplicator: any = null;
+let LRUCache: typeof import('../../core/utils/cache').LRUCache | null = null;
+let globalDeduplicator: import('../../core/utils/request-deduplicator').RequestDeduplicator | null = null;
 
 // Lazy load cache (tree-shakeable)
 async function getCache() {
@@ -25,7 +25,7 @@ async function getCache() {
 async function getDeduplicator() {
   if (!globalDeduplicator) {
     const module = await import('../../core/utils/request-deduplicator');
-    globalDeduplicator = module.globalDeduplicator;
+    globalDeduplicator = new module.RequestDeduplicator();
   }
   return globalDeduplicator;
 }
@@ -57,14 +57,15 @@ export async function generate(
   if (useCache) {
     try {
       const deduplicator = await getDeduplicator();
-      const cacheKey = createCacheKey(apiKey, input);
+      if (deduplicator) {
+        const cacheKey = createCacheKey(apiKey, input);
 
-      return deduplicator.execute(cacheKey, async () => {
-        return generateInternal(apiKey, input, { signal, onProgress });
-      }) as Promise<PrunaResult>;
+        return deduplicator.execute(cacheKey, async () => {
+          return generateInternal(apiKey, input, { signal, onProgress });
+        }) as Promise<PrunaResult>;
+      }
     } catch {
       // Fallback to direct generation if deduplication fails
-      return generateInternal(apiKey, input, { signal, onProgress });
     }
   }
 
