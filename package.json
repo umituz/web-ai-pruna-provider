@@ -1,6 +1,6 @@
 {
   "name": "@umituz/pruna-provider",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "Pruna AI generation client for web apps - text-to-image, image-to-image, and image-to-video",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
