@@ -1,6 +1,7 @@
 /**
- * Deep Comparison Utilities
- * @description Tree-shakeable comparison functions for React memoization
+ * Shallow Equality
+ * @description Lightweight object identity check for React memoization.
+ *              Hash-based comparisons live in math/comparison-hash.ts.
  */
 
 /**
@@ -13,41 +14,16 @@ export function shallowEqual(a: unknown, b: unknown): boolean {
     return false;
   }
 
-  const keysA = Object.keys(a as object);
-  const keysB = Object.keys(b as object);
+  const aRecord = a as Record<string, unknown>;
+  const bRecord = b as Record<string, unknown>;
+  const keysA = Object.keys(aRecord);
+  const keysB = Object.keys(bRecord);
 
   if (keysA.length !== keysB.length) return false;
 
   for (const key of keysA) {
-    if ((a as Record<string, unknown>)[key] !== (b as Record<string, unknown>)[key]) {
-      return false;
-    }
+    if (aRecord[key] !== bRecord[key]) return false;
   }
 
   return true;
-}
-
-/**
- * Generate a hash from an object for quick comparison
- * Uses JSON.stringify but with sorted keys for consistency
- * @returns string - Hash string for comparison
- */
-export function hashObject(obj: unknown): string {
-  if (obj === null || typeof obj !== 'object') {
-    return String(obj);
-  }
-
-  try {
-    return JSON.stringify(obj, Object.keys(obj).sort());
-  } catch {
-    return String(obj);
-  }
-}
-
-/**
- * Memoization hash for React dependencies
- * @returns string - Deterministic hash for memoization
- */
-export function memoHash(...args: unknown[]): string {
-  return args.map(hashObject).join('|');
 }

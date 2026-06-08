@@ -1,7 +1,11 @@
 /**
- * Request Deduplication
- * @description Prevent duplicate API requests by caching in-flight promises
+ * Request Deduplicator
+ * @description Prevents duplicate API requests by coalescing in-flight promises
  */
+
+import { DEFAULT_DEDUPLICATOR_TTL_MS, DEDUPLICATOR_CLEANUP_GRACE_MS } from '../constants/limits';
+import { deriveRequestDeduplicationKey } from '../math/cache-key-derivation';
+import type { RequestSignature } from '../math/cache-key-derivation';
 
 interface PendingRequest {
   promise: Promise<unknown>;
@@ -9,83 +13,66 @@ interface PendingRequest {
 }
 
 export class RequestDeduplicator {
-  private pendingRequests: Map<string, PendingRequest> = new Map();
+  private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly ttl: number;
 
-  constructor(ttl: number = 30000) { // 30 seconds default TTL
+  constructor(ttl: number = DEFAULT_DEDUPLICATOR_TTL_MS) {
     this.ttl = ttl;
   }
 
   /**
-   * Execute a request with deduplication
-   * If a similar request is in-flight, return its promise instead of creating a new one
+   * Execute a request with deduplication.
+   * If a similar request is in-flight and not expired, returns its promise instead.
    */
-  async execute<T>(
-    key: string,
-    fn: () => Promise<T>,
-  ): Promise<T> {
-    // Check for in-flight request
+  execute<T>(key: string, fn: () => Promise<T>): Promise<T> {
     const existing = this.pendingRequests.get(key);
     if (existing) {
-      // Verify it's not expired
       if (Date.now() - existing.timestamp < this.ttl) {
         return existing.promise as Promise<T>;
-      } else {
-        // Clean up expired request
-        this.pendingRequests.delete(key);
       }
+      this.pendingRequests.delete(key);
     }
 
-    // Create new request
-    const promise = fn()
-      .finally(() => {
-        // Clean up after completion (whether success or failure)
-        setTimeout(() => {
-          this.pendingRequests.delete(key);
-        }, 100); // Small delay to prevent race conditions
-      });
-
-    this.pendingRequests.set(key, {
-      promise,
-      timestamp: Date.now(),
+    const promise = fn().finally(() => {
+      setTimeout(() => {
+        this.pendingRequests.delete(key);
+      }, DEDUPLICATOR_CLEANUP_GRACE_MS);
     });
 
+    this.pendingRequests.set(key, { promise, timestamp: Date.now() });
     return promise;
   }
 
-  /**
-   * Clear all pending requests
-   */
   clear(): void {
     this.pendingRequests.clear();
   }
 
-  /**
-   * Get count of in-flight requests
-   */
   size(): number {
-    // Clean up expired requests first
+    this.purgeExpired();
+    return this.pendingRequests.size;
+  }
+
+  private purgeExpired(): void {
     const now = Date.now();
     for (const [key, value] of this.pendingRequests) {
       if (now - value.timestamp >= this.ttl) {
         this.pendingRequests.delete(key);
       }
     }
-    return this.pendingRequests.size;
-  }
-
-  /**
-   * Create a deduplication key from request parameters
-   */
-  static createKey(
-    method: string,
-    url: string,
-    body?: Record<string, unknown>,
-  ): string {
-    const bodyStr = body ? JSON.stringify(body, Object.keys(body).sort()) : '';
-    return `${method}:${url}:${bodyStr}`;
   }
 }
 
-// Global instance for convenience
 export const globalDeduplicator = new RequestDeduplicator();
+
+/**
+ * Build a stable deduplication key from request parameters.
+ * Backwards-compatible wrapper around the math helper.
+ */
+export function createDeduplicationKey(
+  method: string,
+  url: string,
+  body?: Record<string, unknown>,
+): string {
+  const signature: RequestSignature = { method, url, body };
+  return deriveRequestDeduplicationKey(signature);
+}

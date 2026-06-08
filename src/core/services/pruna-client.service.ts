@@ -1,6 +1,6 @@
 /**
  * Pruna API Client Service
- * @description Core service for Pruna API communication
+ * @description Core service for Pruna API communication (file upload, prediction, polling)
  */
 
 import type {
@@ -9,11 +9,39 @@ import type {
   PrunaFileUploadResponse,
   GenerationStage,
 } from '../entities/types';
-import { PRUNA_BASE_URL, PRUNA_PREDICTIONS_URL, PRUNA_FILES_URL } from '../constants';
-import { base64ToBytes, stripBase64Prefix, extractUri, resolveUri } from '../utils/helpers';
+import {
+  PRUNA_FILES_URL,
+  PRUNA_PREDICTIONS_URL,
+  HTTP_PREFIX,
+  POLL_DEFAULTS,
+  MIME_FILE_EXTENSION,
+} from '../constants';
+import { base64ToBytes } from '../utils/base64';
+import { detectImageMime } from '../utils/mime-detector';
+import { parseApiError } from '../utils/api-error-parser';
+import { CancellationError } from '../errors/cancellation-error';
+import { AuthenticationError } from '../errors/authentication-error';
+import { TimeoutError } from '../errors/timeout-error';
+import { isAuthFailureStatus } from '../protocol/http-status';
+import { isTerminalSuccessStatus, isTerminalFailureStatus } from '../protocol/job-status';
+import { isAbortError } from '../protocol/abort-signal-classifier';
+import {
+  buildPrunaApiUrl,
+  buildFileUrlById,
+  isHttpsUrl,
+  isAbsoluteHttpUrl,
+} from '../protocol/pruna-url-builder';
+import { calculateExponentialBackoff } from '../math/exponential-backoff';
+import { extractUri, resolveUri, stripBase64Prefix } from '../utils/uri-resolver';
 
-interface ApiErrorResponse {
-  message?: string;
+interface UploadInit {
+  method: 'POST';
+  headers: Record<string, string>;
+  body: FormData;
+}
+
+function buildFileExtension(mime: string): string {
+  return MIME_FILE_EXTENSION[mime] ?? 'bin';
 }
 
 // ── File upload ───────────────────────────────────────────────────────────────
@@ -27,8 +55,8 @@ export async function uploadImage(
   apiKey: string,
   onProgress?: (stage: GenerationStage) => void,
 ): Promise<string> {
-  if (base64OrUrl.startsWith('https://')) return base64OrUrl;
-  if (base64OrUrl.startsWith('http://')) {
+  if (isHttpsUrl(base64OrUrl)) return base64OrUrl;
+  if (base64OrUrl.startsWith(HTTP_PREFIX)) {
     throw new Error('Only HTTPS URLs are supported for security.');
   }
 
@@ -43,28 +71,27 @@ export async function uploadImage(
     throw new Error('Invalid image format. Provide base64 or a valid HTTPS URL.');
   }
 
-  let mime = 'image/png';
-  if (bytes[0] === 0xFF && bytes[1] === 0xD8) mime = 'image/jpeg';
-  else if (bytes[0] === 0x52 && bytes[1] === 0x49) mime = 'image/webp';
-
-  const blob = new Blob([bytes.buffer as ArrayBuffer], { type: mime });
-  const ext = mime.split('/')[1];
+  const mime = detectImageMime(bytes);
+  const buffer = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+  const blob = new Blob([buffer], { type: mime });
   const formData = new FormData();
-  formData.append('content', blob, `upload.${ext}`);
+  formData.append('content', blob, `upload.${buildFileExtension(mime)}`);
 
   const res = await fetch(PRUNA_FILES_URL, {
     method: 'POST',
     headers: { apikey: apiKey },
     body: formData,
-  });
+  } satisfies UploadInit as RequestInit);
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ message: res.statusText })) as ApiErrorResponse;
-    throw new Error(err.message ?? `File upload error: ${res.status}`);
+    throw await parseApiError(res, 'File upload error');
   }
 
   const data: PrunaFileUploadResponse = await res.json();
-  return data.urls?.get ?? `${PRUNA_FILES_URL}/${data.id}`;
+  return data.urls?.get ?? buildFileUrlById(data.id ?? '');
 }
 
 // ── Prediction ────────────────────────────────────────────────────────────────
@@ -95,11 +122,7 @@ export async function submitPrediction(
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ message: res.statusText })) as ApiErrorResponse;
-    const msg = err.message ?? `API error: ${res.status}`;
-    const error = new Error(msg) as Error & { statusCode: number };
-    error.statusCode = res.status;
-    throw error;
+    throw await parseApiError(res, 'API error');
   }
 
   return res.json();
@@ -107,81 +130,89 @@ export async function submitPrediction(
 
 // ── Polling ───────────────────────────────────────────────────────────────────
 
-/**
- * Calculate exponential backoff delay with jitter
- * Prevents thundering herd problem and reduces server load
- */
-function calculateBackoff(attempt: number, baseInterval: number): number {
-  const exponentialDelay = Math.min(baseInterval * Math.pow(1.5, attempt), 10000); // Max 10s
-  const jitter = exponentialDelay * 0.1 * Math.random(); // ±10% jitter
-  return exponentialDelay + jitter;
+export class GenerationFailedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'GenerationFailedError';
+  }
+}
+
+interface PollAttemptResult {
+  outcome: 'succeeded' | 'continue' | 'transient-failure';
+  uri?: string;
+}
+
+async function attemptPoll(fullUrl: string, apiKey: string, signal: AbortSignal): Promise<PollAttemptResult> {
+  let res: Response;
+  try {
+    res = await fetch(fullUrl, { headers: { apikey: apiKey }, signal });
+  } catch (err) {
+    if (isAbortError(err)) throw new CancellationError();
+    return { outcome: 'transient-failure' };
+  }
+
+  if (!res.ok) {
+    if (isAuthFailureStatus(res.status)) throw new AuthenticationError();
+    return { outcome: 'transient-failure' };
+  }
+
+  let data: PrunaPredictionResponse;
+  try {
+    data = await res.json();
+  } catch {
+    return { outcome: 'transient-failure' };
+  }
+
+  if (isTerminalSuccessStatus(data.status)) {
+    const uri = extractUri(data);
+    if (uri) return { outcome: 'succeeded', uri: resolveUri(uri) };
+    return { outcome: 'transient-failure' };
+  }
+
+  if (isTerminalFailureStatus(data.status)) {
+    throw new GenerationFailedError(data.error ?? 'Generation failed during processing.');
+  }
+
+  return { outcome: 'continue' };
 }
 
 /**
- * Poll async prediction until succeeded/failed or timeout (optimized).
+ * Poll async prediction until succeeded/failed or timeout.
  * Uses exponential backoff to reduce server load and improve efficiency.
  */
 export async function pollForResult(
   pollUrl: string,
   apiKey: string,
-  maxAttempts: number,
-  intervalMs: number,
+  maxAttempts: number = POLL_DEFAULTS.maxAttempts,
+  intervalMs: number = POLL_DEFAULTS.intervalMs,
   signal?: AbortSignal,
   onProgress?: (stage: GenerationStage, attempt: number) => void,
 ): Promise<string> {
-  const fullUrl = pollUrl.startsWith('http') ? pollUrl : `${PRUNA_BASE_URL}${pollUrl}`;
+  const fullUrl = isAbsoluteHttpUrl(pollUrl) ? pollUrl : buildPrunaApiUrl(pollUrl);
   const controller = new AbortController();
-
-  // Chain abort signals
-  signal?.addEventListener('abort', () => controller.abort());
+  const onExternalAbort = (): void => controller.abort();
+  signal?.addEventListener('abort', onExternalAbort);
 
   try {
     for (let i = 0; i < maxAttempts; i++) {
-      if (signal?.aborted) throw new Error('Request cancelled by user');
+      if (signal?.aborted) throw new CancellationError();
 
-      // Exponential backoff with jitter
-      const delay = calculateBackoff(i, intervalMs);
+      const delay = calculateExponentialBackoff({ attempt: i, baseIntervalMs: intervalMs });
       await new Promise<void>(resolve => setTimeout(resolve, delay));
 
-      if (signal?.aborted) throw new Error('Request cancelled by user');
+      if (signal?.aborted) throw new CancellationError();
 
       onProgress?.('polling', i + 1);
 
-      try {
-        const res = await fetch(fullUrl, {
-          headers: { apikey: apiKey },
-          signal: controller.signal,
-        });
-
-        if (!res.ok) {
-          if (res.status === 401 || res.status === 403) {
-            throw new Error('Authentication failed. Please check your API key.');
-          }
-          // Continue polling on other errors
-          continue;
-        }
-
-        const data: PrunaPredictionResponse = await res.json();
-
-        if (data.status === 'succeeded' || data.status === 'completed') {
-          const uri = extractUri(data);
-          if (uri) return resolveUri(uri);
-        } else if (data.status === 'failed') {
-          throw new Error(data.error ?? 'Generation failed during processing.');
-        }
-      } catch (err) {
-        if (err instanceof Error && err.name === 'AbortError') {
-          throw new Error('Request cancelled by user');
-        }
-        // Non-fatal poll error — continue polling with exponential backoff
-        if (err instanceof Error && err.message.includes('Authentication failed')) {
-          throw err;
-        }
+      const result = await attemptPoll(fullUrl, apiKey, controller.signal);
+      if (result.outcome === 'succeeded' && result.uri) {
+        return result.uri;
       }
     }
 
-    throw new Error('Generation timed out. Maximum polling attempts reached.');
+    throw new TimeoutError();
   } finally {
+    signal?.removeEventListener('abort', onExternalAbort);
     controller.abort();
   }
 }

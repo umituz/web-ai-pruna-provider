@@ -11,6 +11,8 @@ export type PrunaResolution = '720p' | '1080p';
 
 export type GenerationStage = 'uploading' | 'predicting' | 'polling';
 
+export type PrunaJobStatus = 'succeeded' | 'completed' | 'failed' | 'processing' | 'starting';
+
 export interface GenerateOptions {
   readonly signal?: AbortSignal;
   readonly onProgress?: (stage: GenerationStage, attempt?: number) => void;
@@ -70,14 +72,20 @@ export interface PrunaResult {
 
 // ── Raw API response shapes ──────────────────────────────────────────────────
 
+export interface PrunaUrlOutput {
+  readonly url: string;
+}
+
+export type PrunaOutput = string | PrunaUrlOutput | readonly string[];
+
 export interface PrunaPredictionResponse {
   readonly generation_url?: string;
-  readonly output?: { readonly url: string } | string | readonly string[];
+  readonly output?: PrunaOutput;
   readonly data?: string;
   readonly video_url?: string;
   readonly get_url?: string;
   readonly status_url?: string;
-  readonly status?: 'succeeded' | 'completed' | 'failed' | 'processing' | 'starting';
+  readonly status?: PrunaJobStatus;
   readonly error?: string;
 }
 

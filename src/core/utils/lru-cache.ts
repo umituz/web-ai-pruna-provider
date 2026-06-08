@@ -1,7 +1,9 @@
 /**
  * LRU Cache Implementation
- * @description Tree-shakeable LRU cache for request deduplication and result caching
+ * @description Tree-shakeable LRU cache with TTL for request deduplication and result caching
  */
+
+import { DEFAULT_CACHE_MAX_SIZE, DEFAULT_CACHE_TTL_MS } from '../constants/limits';
 
 interface CacheNode<K, V> {
   key: K;
@@ -13,65 +15,51 @@ interface CacheNode<K, V> {
 
 export interface CacheOptions<K, V> {
   maxSize?: number;
-  ttl?: number; // Time to live in milliseconds
+  ttl?: number;
   onEvict?: (key: K, value: V) => void;
 }
 
 /**
- * LRU (Least Recently Used) Cache implementation
+ * LRU (Least Recently Used) Cache implementation with TTL
  */
 export class LRUCache<K, V> {
-  private maxSize: number;
-  private ttl: number;
-  private onEvict?: (key: K, value: V) => void;
-  private cache: Map<K, CacheNode<K, V>>;
-  private head: CacheNode<K, V> | null;
-  private tail: CacheNode<K, V> | null;
+  private readonly maxSize: number;
+  private readonly ttl: number;
+  private readonly onEvict?: (key: K, value: V) => void;
+  private readonly cache: Map<K, CacheNode<K, V>>;
+  private head: CacheNode<K, V> | null = null;
+  private tail: CacheNode<K, V> | null = null;
 
   constructor(options: CacheOptions<K, V> = {}) {
-    this.maxSize = options.maxSize ?? 50;
-    this.ttl = options.ttl ?? 5 * 60 * 1000; // 5 minutes default
+    this.maxSize = options.maxSize ?? DEFAULT_CACHE_MAX_SIZE;
+    this.ttl = options.ttl ?? DEFAULT_CACHE_TTL_MS;
     this.onEvict = options.onEvict;
     this.cache = new Map();
-    this.head = null;
-    this.tail = null;
   }
 
-  /**
-   * Get a value from cache
-   * Returns undefined if not found or expired
-   */
   get(key: K): V | undefined {
     const node = this.cache.get(key);
-
     if (!node) return undefined;
 
-    // Check if expired
     if (Date.now() > node.expiresAt) {
       this.delete(key);
       return undefined;
     }
 
-    // Move to head (most recently used)
     this.moveToHead(node);
     return node.value;
   }
 
-  /**
-   * Set a value in cache
-   */
   set(key: K, value: V): void {
     const existingNode = this.cache.get(key);
 
     if (existingNode) {
-      // Update existing node
       existingNode.value = value;
       existingNode.expiresAt = Date.now() + this.ttl;
       this.moveToHead(existingNode);
       return;
     }
 
-    // Create new node
     const newNode: CacheNode<K, V> = {
       key,
       value,
@@ -83,15 +71,11 @@ export class LRUCache<K, V> {
     this.cache.set(key, newNode);
     this.addToHead(newNode);
 
-    // Check if we need to evict
     if (this.cache.size > this.maxSize) {
       this.removeTail();
     }
   }
 
-  /**
-   * Delete a specific key
-   */
   delete(key: K): boolean {
     const node = this.cache.get(key);
     if (!node) return false;
@@ -101,25 +85,16 @@ export class LRUCache<K, V> {
     return true;
   }
 
-  /**
-   * Clear all cache entries
-   */
   clear(): void {
     this.cache.clear();
     this.head = null;
     this.tail = null;
   }
 
-  /**
-   * Get current cache size
-   */
   size(): number {
     return this.cache.size;
   }
 
-  /**
-   * Clean up expired entries
-   */
   cleanup(): void {
     const now = Date.now();
     const expiredKeys: K[] = [];
@@ -133,9 +108,6 @@ export class LRUCache<K, V> {
     expiredKeys.forEach(key => this.delete(key));
   }
 
-  /**
-   * Add node to head of list (most recently used)
-   */
   private addToHead(node: CacheNode<K, V>): void {
     node.prev = null;
     node.next = this.head;
@@ -151,17 +123,11 @@ export class LRUCache<K, V> {
     }
   }
 
-  /**
-   * Move existing node to head
-   */
   private moveToHead(node: CacheNode<K, V>): void {
     this.removeNode(node);
     this.addToHead(node);
   }
 
-  /**
-   * Remove node from list
-   */
   private removeNode(node: CacheNode<K, V>): void {
     if (node.prev) {
       node.prev.next = node.next;
@@ -176,25 +142,15 @@ export class LRUCache<K, V> {
     }
   }
 
-  /**
-   * Remove tail node (least recently used)
-   */
   private removeTail(): void {
     if (!this.tail) return;
 
-    const key = this.tail.key;
-    const value = this.tail.value;
+    const evictedKey = this.tail.key;
+    const evictedValue = this.tail.value;
 
     this.removeNode(this.tail);
-    this.cache.delete(key);
+    this.cache.delete(evictedKey);
 
-    this.onEvict?.(key, value);
+    this.onEvict?.(evictedKey, evictedValue);
   }
-}
-
-/**
- * Create a cache with default options
- */
-export function createCache<K, V>(options?: CacheOptions<K, V>): LRUCache<K, V> {
-  return new LRUCache<K, V>(options);
 }

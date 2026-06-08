@@ -1,98 +1,101 @@
 /**
  * Pruna Generation Service
- * @description High-level generation orchestration (optimized with caching)
+ * @description High-level generation orchestration using the Strategy pattern
+ *              for model-specific input building and the Facade pattern for
+ *              deduplication, prediction, and polling.
  */
 
-import type { PrunaInput, PrunaResult, TextToVideoInput, GenerateOptions } from '../../core/entities/types';
+import type {
+  PrunaInput,
+  PrunaResult,
+  TextToVideoInput,
+  GenerateOptions,
+} from '../../core/entities/types';
 import { DEFAULT_ASPECT_RATIO, P_VIDEO_DEFAULTS, POLL_DEFAULTS } from '../../core/constants';
-import { uploadImage, submitPrediction, pollForResult } from '../../core/services/pruna-client.service';
-import { stripBase64Prefix, extractUri, resolveUri } from '../../core/utils/helpers';
+import { submitPrediction, pollForResult } from '../../core/services/pruna-client.service';
+import { extractUri, resolveUri } from '../../core/utils/uri-resolver';
+import { globalDeduplicator } from '../../core/utils/request-deduplicator';
+import { assertValidApiKey } from '../../core/validation/api-key-validator';
+import { assertValidAspectRatio } from '../../core/validation/aspect-ratio-validator';
+import { assertValidDuration } from '../../core/validation/duration-validator';
+import { assertValidResolution } from '../../core/validation/resolution-validator';
+import { assertSecureImageSource } from '../../core/validation/image-source-validator';
+import { assertValidPrompt } from '../../core/validation/prompt-validator';
+import { assertValidSeed } from '../../core/validation/seed-validator';
+import {
+  isTextToImageInput,
+  isImageToImageInput,
+  isImageToVideoInput,
+} from '../../core/protocol/input-type-guard';
+import { isTerminalSuccessStatus } from '../../core/protocol/job-status';
+import { deriveGenerationCacheKey } from '../../core/math/cache-key-derivation';
+import { createDefaultBuilderRegistry } from '../builders/builder-factory';
+import type { ModelInputBuilderRegistry } from '../builders/model-input-builder';
 
-// Optional imports for tree-shaking
-let LRUCache: typeof import('../../core/utils/cache').LRUCache | null = null;
-let globalDeduplicator: import('../../core/utils/request-deduplicator').RequestDeduplicator | null = null;
+const builderRegistry: ModelInputBuilderRegistry = createDefaultBuilderRegistry();
 
-// Lazy load cache (tree-shakeable)
-async function getCache() {
-  if (!LRUCache) {
-    const module = await import('../../core/utils/cache');
-    LRUCache = module.LRUCache;
+function validateGenerateInput(input: PrunaInput): void {
+  assertValidPrompt(input.prompt, `${input.model}.prompt`);
+  assertValidAspectRatio(input.aspect_ratio, `${input.model}.aspect_ratio`);
+
+  // Each branch narrows `input` to its specific shape so validators can
+  // access model-specific fields with full type safety.
+  if (isTextToImageInput(input)) {
+    assertValidSeed(input.seed, `${input.model}.seed`);
+  } else if (isImageToImageInput(input)) {
+    assertSecureImageSource(input.image, `${input.model}.image`);
+    assertValidSeed(input.seed, `${input.model}.seed`);
+  } else if (isImageToVideoInput(input)) {
+    assertSecureImageSource(input.image, `${input.model}.image`);
+    assertValidDuration(input.duration, `${input.model}.duration`);
+    assertValidResolution(input.resolution, `${input.model}.resolution`);
   }
-  return LRUCache;
 }
-
-// Lazy load deduplicator (tree-shakeable)
-async function getDeduplicator() {
-  if (!globalDeduplicator) {
-    const module = await import('../../core/utils/request-deduplicator');
-    globalDeduplicator = new module.RequestDeduplicator();
-  }
-  return globalDeduplicator;
-}
-
-// ── generate ─────────────────────────────────────────────────────────────────
 
 /**
- * Generate a cache key for request deduplication
- */
-function createCacheKey(apiKey: string, input: PrunaInput): string {
-  return `${apiKey}:${input.model}:${JSON.stringify(input, Object.keys(input).sort())}`;
-}
-
-/**
- * Generate an image or video using a real Pruna model (optimized).
- *
- * @param apiKey  Your Pruna API key
- * @param input   Discriminated union: TextToImageInput | ImageToImageInput | ImageToVideoInput
- * @param options Optional: signal for cancellation, onProgress callback, useCache flag
+ * Generate an image or video using a real Pruna model.
+ * Optionally dedupes concurrent in-flight requests that share the same key.
  */
 export async function generate(
   apiKey: string,
   input: PrunaInput,
-  options?: GenerateOptions & { useCache?: boolean },
+  options: GenerateOptions & { useCache?: boolean } = {},
 ): Promise<PrunaResult> {
-  const { signal, onProgress, useCache = true } = options ?? {};
+  assertValidApiKey(apiKey);
+  validateGenerateInput(input);
 
-  // Request deduplication (optional, tree-shakeable)
+  const { signal, onProgress, useCache = true } = options;
+
   if (useCache) {
-    try {
-      const deduplicator = await getDeduplicator();
-      if (deduplicator) {
-        const cacheKey = createCacheKey(apiKey, input);
-
-        return deduplicator.execute(cacheKey, async () => {
-          return generateInternal(apiKey, input, { signal, onProgress });
-        }) as Promise<PrunaResult>;
-      }
-    } catch {
-      // Fallback to direct generation if deduplication fails
-    }
+    const cacheKey = deriveGenerationCacheKey(apiKey, input as unknown as Record<string, unknown>);
+    return globalDeduplicator.execute(cacheKey, () =>
+      generateInternal(apiKey, input, { signal, onProgress }),
+    );
   }
 
   return generateInternal(apiKey, input, { signal, onProgress });
 }
 
-/**
- * Internal generation logic (extracted for reusability)
- */
 async function generateInternal(
   apiKey: string,
   input: PrunaInput,
-  options?: GenerateOptions,
+  options: GenerateOptions,
 ): Promise<PrunaResult> {
-  const { signal, onProgress } = options ?? {};
-  const modelInput = await buildModelInput(apiKey, input, signal, onProgress);
+  const { signal, onProgress } = options;
+  const builder = builderRegistry.resolve(input.model);
+  const modelInput = await builder.build(input, { apiKey, signal, onProgress });
 
   const response = await submitPrediction(input.model, modelInput, apiKey, signal, onProgress);
 
   const syncUri = extractUri(response);
   if (syncUri) {
-    const url = resolveUri(syncUri);
-    return { url, model: input.model };
+    return { url: resolveUri(syncUri), model: input.model };
   }
 
   const pollUrl = response.get_url ?? response.status_url;
-  if (!pollUrl) throw new Error('Pruna API returned no result and no polling URL.');
+  if (!pollUrl) {
+    throw new Error('Pruna API returned no result and no polling URL.');
+  }
 
   const url = await pollForResult(
     pollUrl,
@@ -106,85 +109,45 @@ async function generateInternal(
   return { url, model: input.model };
 }
 
-// ── generateImageThenVideo ────────────────────────────────────────────────────
-
 /**
- * Two-step pipeline: text → p-image → p-video.
+ * Two-step pipeline: text -> p-image -> p-video.
  * Use when you want to animate a concept without providing a source image.
- *
- * @param apiKey  Your Pruna API key
- * @param input   Prompt + optional video settings (no image needed)
- * @param options Optional: signal for cancellation, onProgress callback
  */
 export async function generateImageThenVideo(
   apiKey: string,
   input: TextToVideoInput,
-  options?: GenerateOptions,
+  options: GenerateOptions = {},
 ): Promise<PrunaResult> {
-  const { signal, onProgress } = options ?? {};
+  assertValidApiKey(apiKey);
+  assertValidPrompt(input.prompt, 'text-to-video.prompt');
+  assertValidAspectRatio(input.aspect_ratio, 'text-to-video.aspect_ratio');
+  assertValidDuration(input.duration, 'text-to-video.duration');
+  assertValidResolution(input.resolution, 'text-to-video.resolution');
+
+  const { signal, onProgress } = options;
   const aspectRatio = input.aspect_ratio ?? DEFAULT_ASPECT_RATIO;
 
-  // Step 1: Generate keyframe image
   onProgress?.('predicting', 1);
-  const imageResult = await generate(apiKey, {
-    model: 'p-image',
-    prompt: input.prompt,
-    aspect_ratio: aspectRatio,
-  }, { signal });
+  const imageResult = await generate(
+    apiKey,
+    { model: 'p-image', prompt: input.prompt, aspect_ratio: aspectRatio },
+    { signal },
+  );
 
-  if (signal?.aborted) throw new Error('Request cancelled by user');
-
-  // Step 2: Animate image to video
   onProgress?.('predicting', 2);
-  return generate(apiKey, {
-    model: 'p-video',
-    prompt: input.prompt,
-    image: imageResult.url,
-    duration: input.duration ?? P_VIDEO_DEFAULTS.duration,
-    resolution: input.resolution ?? P_VIDEO_DEFAULTS.resolution,
-    aspect_ratio: aspectRatio,
-    draft: input.draft ?? P_VIDEO_DEFAULTS.draft,
-  }, { signal, onProgress });
-}
-
-// ── Internal ──────────────────────────────────────────────────────────────────
-
-async function buildModelInput(
-  apiKey: string,
-  input: PrunaInput,
-  signal?: AbortSignal,
-  onProgress?: GenerateOptions['onProgress'],
-): Promise<Record<string, unknown>> {
-  const aspectRatio = input.aspect_ratio ?? DEFAULT_ASPECT_RATIO;
-
-  if (input.model === 'p-image') {
-    const payload: Record<string, unknown> = { prompt: input.prompt, aspect_ratio: aspectRatio };
-    if (input.seed !== undefined) payload.seed = input.seed;
-    return payload;
-  }
-
-  if (input.model === 'p-image-edit') {
-    const payload: Record<string, unknown> = {
-      images: [stripBase64Prefix(input.image)],
+  return generate(
+    apiKey,
+    {
+      model: 'p-video',
       prompt: input.prompt,
+      image: imageResult.url,
+      duration: input.duration ?? P_VIDEO_DEFAULTS.duration,
+      resolution: input.resolution ?? P_VIDEO_DEFAULTS.resolution,
       aspect_ratio: aspectRatio,
-    };
-    if (input.seed !== undefined) payload.seed = input.seed;
-    return payload;
-  }
-
-  // p-video: image required — upload if base64
-  if (signal?.aborted) throw new Error('Request cancelled by user');
-  const fileUrl = await uploadImage(input.image, apiKey, onProgress);
-
-  return {
-    image: fileUrl,
-    prompt: input.prompt,
-    duration: input.duration ?? P_VIDEO_DEFAULTS.duration,
-    resolution: input.resolution ?? P_VIDEO_DEFAULTS.resolution,
-    fps: P_VIDEO_DEFAULTS.fps,
-    draft: input.draft ?? P_VIDEO_DEFAULTS.draft,
-    aspect_ratio: aspectRatio,
-    prompt_upsampling: P_VIDEO_DEFAULTS.promptUpsampling,
-  };
+      draft: input.draft ?? P_VIDEO_DEFAULTS.draft,
+    },
+    { signal, onProgress },
+  );
 }
+
+export { isTerminalSuccessStatus };
